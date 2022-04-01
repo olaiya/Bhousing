@@ -28,12 +28,12 @@ xtest, xval, ytest, yval=train_test_split(xtest, ytest, test_size=0.5)
 ##Build a simple CNN to model Boston housing
 
 model = Sequential()
-model.add(Conv1D(32, 2, activation="relu", input_shape=(13,1)))
+model.add(Conv1D(32, 2, activation="relu", input_shape=(13,1), name="inputlayer"))
 model.add(MaxPool1D(2, name="maxpoolinglayer1"))
-model.add(Conv1D(32, 2, activation="relu"))
+model.add(Conv1D(32, 2, activation="relu", name="convlayer1"))
 #model.add(MaxPool1D(2, name="maxpoolinglayer2"))
 model.add(Flatten())
-model.add(Dense(24, activation="relu"))
+model.add(Dense(24, activation="relu", name="denselayer1"))
 model.add(Dense(1,name='output_dense'))
 model.compile(loss="mse", optimizer="adam")
 model.summary()
@@ -56,7 +56,7 @@ cp_callback = tf.keras.callbacks.ModelCheckpoint(filepath=modelName,
         verbose=1)
 
 batch_size = 12
-n_epochs = 100
+n_epochs = 50
 
 
 start = time.time()
@@ -92,7 +92,7 @@ def pruneFunction(layer):
                                                                    end_step = NSTEPS*10,
                                                                    frequency = NSTEPS)
                      }
-    if isinstance(layer, tf.keras.layers.Conv2D):
+    if isinstance(layer, tf.keras.layers.Conv1D):
         return tfmot.sparsity.keras.prune_low_magnitude(layer, **pruning_params)
     if isinstance(layer, tf.keras.layers.Dense) and layer.name!='output_dense':
         return tfmot.sparsity.keras.prune_low_magnitude(layer, **pruning_params)
@@ -103,10 +103,11 @@ train_pruned = True # True if you want to retrain, false if you want to load a p
 
 
 modelName_pruned = 'pruned_cnn_model.h5'
-if train_pruned:
 
-    LOSS        = "mse"
-    OPTIMIZER   = "adam"
+LOSS        = "mse"
+OPTIMIZER   = "adam"
+
+if train_pruned:
 
     model_pruned.compile(loss=LOSS, optimizer=OPTIMIZER)
 
@@ -134,6 +135,7 @@ else:
     co['PruneLowMagnitude'] = pruning_wrapper.PruneLowMagnitude
     model_pruned = tf.keras.models.load_model(modelName_pruned, custom_objects=co)
     model_pruned  = strip_pruning(model_pruned)
+    model_pruned.compile(loss=LOSS, optimizer=OPTIMIZER)
 
 print('Running predictions\n')
 ypred_prune = model_pruned.predict(xtest)
@@ -159,61 +161,105 @@ from qkeras.utils import _add_supported_quantized_objects
 co = {}
 _add_supported_quantized_objects(co)
 co['PruneLowMagnitude'] = pruning_wrapper.PruneLowMagnitude
-model_pruned = tf.keras.models.load_model(modelName_pruned, custom_objects=co)
-model_pruned  = strip_pruning(model_pruned)
+model = tf.keras.models.load_model(modelName_pruned, custom_objects=co)
+model  = strip_pruning(model_pruned)
+model.compile(loss=LOSS, optimizer=OPTIMIZER)
 
-
-hls4ml.model.optimizer.OutputRoundingSaturationMode.layers = ['Activation']
-hls4ml.model.optimizer.OutputRoundingSaturationMode.rounding_mode = 'AP_RND'
-hls4ml.model.optimizer.OutputRoundingSaturationMode.saturation_mode = 'AP_SAT'
+#Check model loaded correctly
+print('Running predictions\n')
+ypred_prune = model.predict(xtest)
+print(model.evaluate(xtrain, ytrain))
+print("MSE: %.4f" % mean_squared_error(ytest, ypred_prune))
 
 #First, the baseline model
-hls_config = hls4ml.utils.config_from_keras_model(model_pruned, granularity='name')
+hls_config = hls4ml.utils.config_from_keras_model(model, granularity='name')
+
+for layer in hls_config['LayerName'].keys():
+    hls_config['LayerName'][layer]['Trace'] = True
+
+hls_model = hls4ml.converters.convert_from_keras_model(model,
+                                                       hls_config=hls_config,
+                                                       output_dir='model_1/hls4ml_prj_2',
+                                                       part='xcu250-figd2104-2L-e')
+
+print('\nProfiling model\n')
+#plots = hls4ml.model.profiling.numerical(model=model, hls_model=hls_model, X=xtest)
+#for i, plot in enumerate(plots):
+#    plot.savefig(f'hls4mlPlots{i}.png')
 
 # Set the precision and reuse factor for the full model
-hls_config['Model']['Precision'] = 'ap_fixed<16,6>'
+hls_config['Model']['Precision'] = 'ap_fixed<16,10>'
 hls_config['Model']['ReuseFactor'] = 1
 
-# Create an entry for each layer, here you can for instance change the strategy for a layer to 'resource'
-# or increase the reuse factor individually for large layers.
-# In this case, we designed the model to be small enough for a fully parallel implementation
-# so we use the latency strategy and reuse factor of 1 for all layers.
-for Layer in hls_config['LayerName'].keys():
-    hls_config['LayerName'][Layer]['Strategy'] = 'Latency'
-    hls_config['LayerName'][Layer]['ReuseFactor'] = 1
-#If you want best numerical performance for high-accuray models, while the default latency strategy is faster but numerically more unstable
-hls_config['LayerName']['output_dense']['Strategy'] = 'Stable'
+hls_config['LayerName']['inputlayer_input']['Precision']['result'] = 'ap_fixed<16,10>'
+hls_config['LayerName']['inputlayer']['Precision']['result'] = 'ap_fixed<16,10>'
+hls_config['LayerName']['inputlayer']['Precision']['bias'] = 'ap_fixed<16,10>'
+hls_config['LayerName']['inputlayer']['Precision']['weight'] = 'ap_fixed<16,10>'
+#hls_config['LayerName']['maxpoolinglayer1']['Precision']['result'] = 'ap_fixed<16,10>'
+hls_config['LayerName']['inputlayer_relu']['Precision'] = 'ap_fixed<16,10>'
+hls_config['LayerName']['inputlayer_relu']['table_t'] = 'ap_fixed<18,10>'
+
+hls_config['LayerName']['maxpoolinglayer1']['Precision'] = 'ap_fixed<16,10>'
+hls_config['LayerName']['convlayer1']['Precision']['result'] = 'ap_fixed<16,10>'
+hls_config['LayerName']['convlayer1']['Precision']['bias'] = 'ap_fixed<16,10>'
+hls_config['LayerName']['convlayer1']['Precision']['weight'] = 'ap_fixed<16,10>'
+hls_config['LayerName']['convlayer1_relu']['Precision'] = 'ap_fixed<16,10>'
+hls_config['LayerName']['convlayer1_relu']['table_t'] = 'ap_fixed<18,10>'
+
+#hls_config['LayerName']['flatten']['Precision']['result'] = 'ap_fixed<16,10>'
+hls_config['LayerName']['denselayer1']['Precision']['result'] = 'ap_fixed<16,10>'
+hls_config['LayerName']['denselayer1']['Precision']['bias'] = 'ap_fixed<16,10>'
+hls_config['LayerName']['denselayer1']['Precision']['weight'] = 'ap_fixed<16,10>'
+hls_config['LayerName']['denselayer1_relu']['Precision'] = 'ap_fixed<16,10>'
+hls_config['LayerName']['denselayer1_relu']['table_t'] = 'ap_fixed<18,10>'
+
+hls_config['LayerName']['output_dense']['Precision']['result'] = 'ap_fixed<16,10>'
+hls_config['LayerName']['output_dense']['Precision']['bias'] = 'ap_fixed<16,10>'
+hls_config['LayerName']['output_dense']['Precision']['weight'] = 'ap_fixed<16,10>'
+hls_config['LayerName']['output_dense_linear']['Precision'] = 'ap_fixed<16,10>'
+hls_config['LayerName']['output_dense_linear']['table_t'] = 'ap_fixed<18,10>'
+#Try model
+hls_model = hls4ml.converters.convert_from_keras_model(model,
+                                                       hls_config=hls_config,
+                                                       output_dir='model_2/hls4ml_prj_2',
+                                                       part='xcu250-figd2104-2L-e')
+
+print('\nProfiling model\n')
+#plots2 = hls4ml.model.profiling.numerical(model=model, hls_model=hls_model, X=xtest)
+#for i, plot in enumerate(plots2):
+#    plot.savefig(f'hls4mlPlots{i}_mod.png')
+
 plotting.print_dict(hls_config)
-
-cfg = hls4ml.converters.create_config(backend='Vivado')
-cfg['IOType']     = 'io_stream' # Must set this if using CNNs!
-cfg['HLSConfig']  = hls_config
-cfg['KerasModel'] = model_pruned
-cfg['OutputDir']  = 'pruned_cnn/'
-cfg['XilinxPart'] = 'xcu250-figd2104-2L-e'
-
-hls_model = hls4ml.converters.keras_to_hls(cfg)
 
 start = time.time()
 hls_model.compile()
 end = time.time()
 print('It took {} minutes to run HLS compilation\n'.format( (end - start)/60.))
 
-plt.figure(3)
-hls4ml.utils.plot_model(hls_model, show_shapes=True, show_precision=True, to_file=None)
-hls4ml.model.profiling.numerical(model=model, hls_model=hls_model)
-plt.savefig('hls4mlPlots.png')
+'''
+hls4ml_pred, hls4ml_trace = hls_model.trace(xtest)
+keras_trace = hls4ml.model.profiling.get_ymodel_keras(model, xtest)
 
+
+print("Keras layer 'inputlayer', first sample:")
+print(keras_trace['inputlayer'][0])
+print("hls4ml layer 'inputlayer', first sample:")
+print(hls4ml_trace['inputlayer'][0])
+print('Length of object is:')
+print(len(keras_trace['inputlayer']))
+print(keras_trace['inputlayer'][0]-hls4ml_trace['inputlayer'][0])
+'''
 
 start = time.time()
 print('Running predictions\n')
-ypred_hls = hls_model.predict(np.ascontiguousarray(xtest))
+#ypred_hls = hls_model.predict(np.ascontiguousarray(xtest))
+ypred_hls = hls_model.predict(xtest)
 print("MSE hls: %.4f" % mean_squared_error(ytest, ypred_hls))
 end = time.time()
 print('It took {} minutes to run predictions\n'.format( (end - start)/60.))
 
 x_ax_hls = range(len(ypred_hls))
-plt.figure(4)
+plt.figure(6)
 plt.scatter(x_ax_hls, ytest, s=5, color="blue", label="original")
 plt.plot(x_ax_hls, ypred_hls, lw=0.8, color="red", label="predicted")
 plt.legend()
