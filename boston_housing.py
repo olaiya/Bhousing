@@ -27,22 +27,22 @@ xtest, xval, ytest, yval=train_test_split(xtest, ytest, test_size=0.5)
 
 ##Build a simple CNN to model Boston housing
 
-model = Sequential()
-model.add(Conv1D(32, 2, activation="relu", input_shape=(13,1), name="inputlayer"))
-model.add(MaxPool1D(2, name="maxpoolinglayer1"))
-model.add(Conv1D(32, 2, activation="relu", name="convlayer1"))
-#model.add(MaxPool1D(2, name="maxpoolinglayer2"))
-model.add(Flatten())
-model.add(Dense(24, activation="relu", name="denselayer1"))
-model.add(Dense(1,name='output_dense'))
-model.compile(loss="mse", optimizer="adam")
-model.summary()
+base_model = Sequential()
+base_model.add(Conv1D(32, 2, activation="relu", input_shape=(13,1), name="inputlayer"))
+base_model.add(MaxPool1D(2, name="maxpoolinglayer1"))
+base_model.add(Conv1D(32, 2, activation="relu", name="convlayer1"))
+#base_model.add(MaxPool1D(2, name="maxpoolinglayer2"))
+base_model.add(Flatten())
+base_model.add(Dense(24, activation="relu", name="denselayer1"))
+base_model.add(Dense(1,name='output_dense'))
+base_model.compile(loss="mse", optimizer="adam")
+base_model.summary()
 
 modelName = 'bhousing.h5'
 
 #Check the size of the layers in your neural net
 print("Checking size of layers in model")
-for layer in model.layers:
+for layer in base_model.layers:
     if layer.__class__.__name__ in ['Conv1D', 'Dense']:
         w = layer.get_weights()[0]
         layersize = np.prod(w.shape)
@@ -56,27 +56,7 @@ cp_callback = tf.keras.callbacks.ModelCheckpoint(filepath=modelName,
         verbose=1)
 
 batch_size = 12
-n_epochs = 50
-
-
-start = time.time()
-history = model.fit(xtrain, ytrain, validation_data=(xval, yval), callbacks=[cp_callback], batch_size=batch_size,epochs=n_epochs)
-end = time.time()
-print('It took {} minutes to train Keras model'.format( (end - start)/60.))
-
-print('\nSaving model\n')
-model.save(modelName)
-print('Running predictions\n')
-ypred = model.predict(xtest)
-print(model.evaluate(xtrain, ytrain))
-print("MSE: %.4f" % mean_squared_error(ytest, ypred))
-
-x_ax = range(len(ypred))
-plt.scatter(x_ax, ytest, s=5, color="blue", label="original")
-plt.plot(x_ax, ypred, lw=0.8, color="red", label="predicted")
-plt.legend()
-plt.savefig('BHousing.png')
-plt.show()
+n_epochs = 100
 
 ##Prune model
 print('Shape is: {}'.format(xtrain.shape))
@@ -98,7 +78,7 @@ def pruneFunction(layer):
         return tfmot.sparsity.keras.prune_low_magnitude(layer, **pruning_params)
     return layer
 
-model_pruned = tf.keras.models.clone_model( model, clone_function=pruneFunction)
+model = tf.keras.models.clone_model( base_model, clone_function=pruneFunction)
 train_pruned = True # True if you want to retrain, false if you want to load a previsously trained model
 
 
@@ -109,7 +89,7 @@ OPTIMIZER   = "adam"
 
 if train_pruned:
 
-    model_pruned.compile(loss=LOSS, optimizer=OPTIMIZER)
+    model.compile(loss=LOSS, optimizer=OPTIMIZER)
 
     callbacks = [
             tf.keras.callbacks.EarlyStopping(patience=10, verbose=1),
@@ -118,11 +98,11 @@ if train_pruned:
             ]
 
     start = time.time()
-    history = model_pruned.fit(xtrain, ytrain, validation_data=(xval, yval), callbacks=[pruning_callbacks.UpdatePruningStep()], batch_size=batch_size,epochs=n_epochs)
+    history = model.fit(xtrain, ytrain, validation_data=(xval, yval), callbacks=[pruning_callbacks.UpdatePruningStep()], batch_size=batch_size,epochs=n_epochs)
     end = time.time()
     print('It took {} minutes to train pruned Keras model'.format( (end - start)/60.))
 
-    model_pruned.save(modelName_pruned)
+    model.save(modelName_pruned)
 
 else:
     from tensorflow_model_optimization.sparsity.keras import strip_pruning
@@ -133,13 +113,13 @@ else:
     co = {}
     _add_supported_quantized_objects(co)
     co['PruneLowMagnitude'] = pruning_wrapper.PruneLowMagnitude
-    model_pruned = tf.keras.models.load_model(modelName_pruned, custom_objects=co)
-    model_pruned  = strip_pruning(model_pruned)
-    model_pruned.compile(loss=LOSS, optimizer=OPTIMIZER)
+    model = tf.keras.models.load_model(modelName_pruned, custom_objects=co)
+    model  = strip_pruning(model_pruned)
+    model.compile(loss=LOSS, optimizer=OPTIMIZER)
 
 print('Running predictions\n')
-ypred_prune = model_pruned.predict(xtest)
-print(model_pruned.evaluate(xtrain, ytrain))
+ypred_prune = model.predict(xtest)
+print(model.evaluate(xtrain, ytrain))
 print("MSE: %.4f" % mean_squared_error(ytest, ypred_prune))
 
 x_ax_prune = range(len(ypred_prune))
@@ -158,11 +138,12 @@ from tensorflow_model_optimization.python.core.sparsity.keras import pruning_wra
 
 from qkeras.utils import _add_supported_quantized_objects
 
+
 co = {}
 _add_supported_quantized_objects(co)
 co['PruneLowMagnitude'] = pruning_wrapper.PruneLowMagnitude
 model = tf.keras.models.load_model(modelName_pruned, custom_objects=co)
-model  = strip_pruning(model_pruned)
+model  = strip_pruning(model)
 model.compile(loss=LOSS, optimizer=OPTIMIZER)
 
 #Check model loaded correctly
@@ -183,9 +164,9 @@ hls_model = hls4ml.converters.convert_from_keras_model(model,
                                                        part='xcu250-figd2104-2L-e')
 
 print('\nProfiling model\n')
-#plots = hls4ml.model.profiling.numerical(model=model, hls_model=hls_model, X=xtest)
-#for i, plot in enumerate(plots):
-#    plot.savefig(f'hls4mlPlots{i}.png')
+plots = hls4ml.model.profiling.numerical(model=base_model, hls_model=hls_model, X=xtest)
+for i, plot in enumerate(plots):
+    plot.savefig(f'hls4mlPlots{i}.png')
 
 # Set the precision and reuse factor for the full model
 hls_config['Model']['Precision'] = 'ap_fixed<16,10>'
@@ -225,9 +206,9 @@ hls_model = hls4ml.converters.convert_from_keras_model(model,
                                                        part='xcu250-figd2104-2L-e')
 
 print('\nProfiling model\n')
-#plots2 = hls4ml.model.profiling.numerical(model=model, hls_model=hls_model, X=xtest)
-#for i, plot in enumerate(plots2):
-#    plot.savefig(f'hls4mlPlots{i}_mod.png')
+plots2 = hls4ml.model.profiling.numerical(model=base_model, hls_model=hls_model, X=xtest)
+for i, plot in enumerate(plots2):
+    plot.savefig(f'hls4mlPlots{i}_mod.png')
 
 plotting.print_dict(hls_config)
 
@@ -235,20 +216,6 @@ start = time.time()
 hls_model.compile()
 end = time.time()
 print('It took {} minutes to run HLS compilation\n'.format( (end - start)/60.))
-
-'''
-hls4ml_pred, hls4ml_trace = hls_model.trace(xtest)
-keras_trace = hls4ml.model.profiling.get_ymodel_keras(model, xtest)
-
-
-print("Keras layer 'inputlayer', first sample:")
-print(keras_trace['inputlayer'][0])
-print("hls4ml layer 'inputlayer', first sample:")
-print(hls4ml_trace['inputlayer'][0])
-print('Length of object is:')
-print(len(keras_trace['inputlayer']))
-print(keras_trace['inputlayer'][0]-hls4ml_trace['inputlayer'][0])
-'''
 
 start = time.time()
 print('Running predictions\n')
