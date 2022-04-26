@@ -51,10 +51,6 @@ for layer in base_model.layers:
             print("Layer {} is too large ({}), are you sure you want to train?".format(layer.name,layersize))
 
 
-cp_callback = tf.keras.callbacks.ModelCheckpoint(filepath=modelName,
-        save_best_only=True,
-        verbose=1)
-
 batch_size = 12
 n_epochs = 100
 
@@ -63,63 +59,34 @@ print('Shape is: {}'.format(xtrain.shape))
 NSTEPS = int(xtrain.shape[0])  // batch_size #90% train, 10% validation in 10-fold cross validation
 print('Number of training steps per epoch is {}'.format(NSTEPS))
 
-# Prune all convolutional and dense layers gradually from 0 to 50% sparsity every 2 epochs,
-# ending by the 10th epoch
-def pruneFunction(layer):
-    pruning_params = {'pruning_schedule': sparsity.PolynomialDecay(initial_sparsity = 0.0,
-                                                                   final_sparsity = 0.50,
-                                                                   begin_step = NSTEPS*2,
-                                                                   end_step = NSTEPS*10,
-                                                                   frequency = NSTEPS)
-                     }
-    if isinstance(layer, tf.keras.layers.Conv1D):
-        return tfmot.sparsity.keras.prune_low_magnitude(layer, **pruning_params)
-    if isinstance(layer, tf.keras.layers.Dense) and layer.name!='output_dense':
-        return tfmot.sparsity.keras.prune_low_magnitude(layer, **pruning_params)
-    return layer
-
-model = tf.keras.models.clone_model( base_model, clone_function=pruneFunction)
-train_pruned = True # True if you want to retrain, false if you want to load a previsously trained model
+#
+train_model = True # True if you want to retrain, false if you want to load a previsously trained model
 
 
-modelName_pruned = 'pruned_cnn_model.h5'
+modelName = 'base_pruned_cnn_model.h5'
 
 LOSS        = "mse"
 OPTIMIZER   = "adam"
 
-if train_pruned:
+if train_model:
 
-    model.compile(loss=LOSS, optimizer=OPTIMIZER)
-
-    callbacks = [
-            tf.keras.callbacks.EarlyStopping(patience=10, verbose=1),
-            tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3, verbose=1),
-            pruning_callbacks.UpdatePruningStep()
-            ]
+    base_model.compile(loss=LOSS, optimizer=OPTIMIZER)
 
     start = time.time()
-    history = model.fit(xtrain, ytrain, validation_data=(xval, yval), callbacks=[pruning_callbacks.UpdatePruningStep()], batch_size=batch_size,epochs=n_epochs)
+    history = base_model.fit(xtrain, ytrain, validation_data=(xval, yval), batch_size=batch_size,epochs=n_epochs)
     end = time.time()
     print('It took {} minutes to train pruned Keras model'.format( (end - start)/60.))
 
-    model.save(modelName_pruned)
+    base_model.save(modelName)
 
 else:
-    from tensorflow_model_optimization.sparsity.keras import strip_pruning
-    from tensorflow_model_optimization.python.core.sparsity.keras import pruning_wrapper
-
-    from qkeras.utils import _add_supported_quantized_objects
-
-    co = {}
-    _add_supported_quantized_objects(co)
-    co['PruneLowMagnitude'] = pruning_wrapper.PruneLowMagnitude
-    model = tf.keras.models.load_model(modelName_pruned, custom_objects=co)
-    model  = strip_pruning(model_pruned)
-    model.compile(loss=LOSS, optimizer=OPTIMIZER)
+    print('Loading model')
+    base_model = tf.keras.models.load_model(modelName)
+    base_model.compile(loss=LOSS, optimizer=OPTIMIZER)
 
 print('Running predictions\n')
-ypred_prune = model.predict(xtest)
-print(model.evaluate(xtrain, ytrain))
+ypred_prune = base_model.predict(xtest)
+print(base_model.evaluate(xtrain, ytrain))
 print("MSE: %.4f" % mean_squared_error(ytest, ypred_prune))
 
 x_ax_prune = range(len(ypred_prune))
@@ -133,38 +100,21 @@ plt.show()
 import hls4ml
 import plotting
 
-from tensorflow_model_optimization.sparsity.keras import strip_pruning
-from tensorflow_model_optimization.python.core.sparsity.keras import pruning_wrapper
-
-from qkeras.utils import _add_supported_quantized_objects
-
-
-co = {}
-_add_supported_quantized_objects(co)
-co['PruneLowMagnitude'] = pruning_wrapper.PruneLowMagnitude
-model = tf.keras.models.load_model(modelName_pruned, custom_objects=co)
-model  = strip_pruning(model)
-model.compile(loss=LOSS, optimizer=OPTIMIZER)
-
-#Check model loaded correctly
-print('Running predictions\n')
-ypred_prune = model.predict(xtest)
-print(model.evaluate(xtrain, ytrain))
-print("MSE: %.4f" % mean_squared_error(ytest, ypred_prune))
-
 #First, the baseline model
-hls_config = hls4ml.utils.config_from_keras_model(model, granularity='name')
+hls_config = hls4ml.utils.config_from_keras_model(base_model, granularity='name')
 
 for layer in hls_config['LayerName'].keys():
     hls_config['LayerName'][layer]['Trace'] = True
 
-hls_model = hls4ml.converters.convert_from_keras_model(model,
+
+hls_model = hls4ml.converters.convert_from_keras_model(base_model,
                                                        hls_config=hls_config,
                                                        output_dir='model_1/hls4ml_prj_2',
                                                        part='xcu250-figd2104-2L-e')
 
 print('\nProfiling model\n')
 plots = hls4ml.model.profiling.numerical(model=base_model, hls_model=hls_model, X=xtest)
+
 for i, plot in enumerate(plots):
     plot.savefig(f'hls4mlPlots{i}.png')
 
@@ -200,13 +150,14 @@ hls_config['LayerName']['output_dense']['Precision']['weight'] = 'ap_fixed<16,10
 hls_config['LayerName']['output_dense_linear']['Precision'] = 'ap_fixed<16,10>'
 hls_config['LayerName']['output_dense_linear']['table_t'] = 'ap_fixed<18,10>'
 #Try model
-hls_model = hls4ml.converters.convert_from_keras_model(model,
+hls_model = hls4ml.converters.convert_from_keras_model(base_model,
                                                        hls_config=hls_config,
                                                        output_dir='model_2/hls4ml_prj_2',
                                                        part='xcu250-figd2104-2L-e')
 
 print('\nProfiling model\n')
 plots2 = hls4ml.model.profiling.numerical(model=base_model, hls_model=hls_model, X=xtest)
+
 for i, plot in enumerate(plots2):
     plot.savefig(f'hls4mlPlots{i}_mod.png')
 
