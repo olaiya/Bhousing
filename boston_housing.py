@@ -1,4 +1,3 @@
-from sklearn.datasets import load_boston
 import tensorflow as tf
 from keras.models import Sequential
 from keras.layers import Dense, Conv1D, Flatten, MaxPool1D
@@ -9,11 +8,17 @@ import tensorflow_model_optimization as tfmot
 from tensorflow_model_optimization.sparsity import keras as sparsity
 from tensorflow_model_optimization.python.core.sparsity.keras import pruning_callbacks
 import numpy as np
+import pandas as pd
 import time
 
 
-boston = load_boston()
-x, y = boston.data, boston.target
+data_url = "http://lib.stat.cmu.edu/datasets/boston"
+raw_df = pd.read_csv(data_url, sep="\s+", skiprows=22, header=None)
+data = np.hstack([raw_df.values[::2, :], raw_df.values[1::2, :2]])
+target = raw_df.values[1::2, 2]
+
+
+x, y = data, target
 print(x.shape)
 
 x = x.reshape(x.shape[0], x.shape[1], 1)
